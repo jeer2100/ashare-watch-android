@@ -26,10 +26,37 @@
   .row .info { flex:1; }
   .row .delta { font-size:12px; }
   .row.waiting { color:#aaa; }
+  .row.clickable { cursor:pointer; }
+  .row.clickable:active { background:#fafafa; }
+  .arrow { color:#bbb; font-size:14px; margin-left:6px; }
   button { background:#c62828; color:#fff; border:none; border-radius:8px; padding:10px 14px; font-size:14px; width:100%; }
   button:disabled { background:#bbb; }
   .tip { font-size:11px; color:#999; line-height:1.6; padding:0 4px 20px; }
   #msg { font-size:12px; color:#777; margin-top:8px; min-height:16px; }
+  #summaryCard { cursor:pointer; }
+  /* 详情弹层 */
+  #detailMask { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50; display:none; }
+  #detailMask.show { display:block; }
+  #detailPanel { position:absolute; left:0; right:0; bottom:0; top:56px; background:#f7f7f7; border-radius:16px 16px 0 0; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  .dhead { background:#c62828; color:#fff; padding:18px 16px; border-radius:16px 16px 0 0; position:sticky; top:0; }
+  .dhead .dtitle { font-size:22px; font-weight:600; }
+  .dhead .dbadge { display:inline-block; font-size:11px; background:rgba(255,255,255,.22); padding:2px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
+  .dhead .dsub { font-size:12px; opacity:.85; margin-top:6px; }
+  .dstat { display:flex; gap:0; padding:14px 16px; background:#c62828; color:#fff; }
+  .dstat > div { flex:1; text-align:center; }
+  .dstat .v { font-size:20px; font-weight:600; }
+  .dstat .k { font-size:11px; opacity:.85; margin-top:2px; }
+  .dbody { margin:12px; background:#fff; border-radius:10px; padding:16px; font-size:14px; line-height:1.9; color:#333; }
+  .dbody h3 { font-size:14px; margin:16px 0 6px; color:#111; }
+  .dbody h3:first-child { margin-top:0; }
+  .dbody ol { margin:0; padding-left:22px; }
+  .dbody li { padding-left:2px; }
+  .dbody .none { color:#999; }
+  .dbody .muted { color:#777; font-size:13px; }
+  .dbody .sector-list > div { padding:2px 0; }
+  .dbody b { color:#c62828; font-weight:600; }
+  .dclose { position:absolute; top:14px; right:16px; color:#fff; font-size:22px; line-height:1; cursor:pointer; z-index:2; }
+  .mem { font-size:11px; color:#aaa; padding:0 16px 24px; }
 </style>
 </head>
 <body>
@@ -42,7 +69,7 @@
     <button id="fetchBtn">立即抓取当前快照</button>
     <div id="msg">页面打开时会自动抓取一次，并每分钟检查新节点</div>
   </div>
-  <div class="card">
+  <div class="card" id="summaryCard">
     <div id="dateLabel" style="font-size:12px;color:#777;margin-bottom:10px;">今日</div>
     <div class="nums">
       <div class="numbox"><div class="label">涨停家数</div><div class="value zt" id="zt">—</div><div class="delta" id="ztDelta"></div></div>
@@ -51,8 +78,27 @@
     <div id="sector" style="font-size:12px;color:#666;margin-top:10px;"></div>
   </div>
   <div class="card"><div id="timeline"></div></div>
-  <p class="tip">数据来自东方财富公开接口。本版本为网页 App，需在页面打开时才能抓取；关闭页面后不会后台更新。若手机支持安装，可通过浏览器菜单「添加到主屏幕」获得独立图标。</p>
+  <p class="tip">数据来自东方财富公开接口。点任意有数据的节点，可查看四条明细：涨停前 5 个股、连板前 5 个股、个股所属板块、较上一节点增量与炸板家数。本版本为网页 App，需在页面打开时才能抓取；关闭页面后不会后台更新。可通过浏览器菜单「添加到主屏幕」获得独立图标。</p>
 </main>
+
+<div id="detailMask">
+  <div id="detailPanel">
+    <div class="dhead">
+      <span class="dclose" id="dclose">×</span>
+      <div><span class="dtitle" id="dtitle">10:40</span><span class="dbadge" id="dbadge">实时快照</span></div>
+      <div class="dsub" id="dsub">11月19日 周四</div>
+    </div>
+    <div class="dstat">
+      <div><div class="v" id="dzt">—</div><div class="k">涨停</div></div>
+      <div><div class="v" id="dzb">—</div><div class="k">炸板</div></div>
+      <div><div class="v" id="drate">—</div><div class="k">炸板率</div></div>
+      <div><div class="v" id="dtop">—</div><div class="k">增量最多板块</div></div>
+    </div>
+    <div class="dbody" id="dbody"></div>
+    <div class="mem">数据来源：东方财富公开行情接口 · 仅供参考，不构成投资建议</div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

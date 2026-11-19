@@ -108,12 +108,11 @@ Future<PoolData?> _fetchZbSafe(String compactDate, String node) async {
   }
 }
 
-Future<Map<String, dynamic>?> fetchRawSnapshot() async {
-  final DateTime now = DateTime.now().toUtc().add(const Duration(hours: 8));
+Future<Map<String, dynamic>?> _buildSnapshot(
+  DateTime now,
+  String node,
+) async {
   if (now.weekday == 6 || now.weekday == 7) return null;
-
-  final String node = '${_pad(now.hour)}:${_pad(now.minute)}';
-  if (!kNodes.contains(node)) return null;
 
   final String compactDate =
       '${now.year}${_pad(now.month)}${_pad(now.day)}';
@@ -133,4 +132,21 @@ Future<Map<String, dynamic>?> fetchRawSnapshot() async {
     'maxLb': _maxLb(zt.pool),
     'ts': DateTime.now().millisecondsSinceEpoch,
   };
+}
+
+/// 后台服务用：只在 25 个整点节点分钟抓取，保证时间线是整齐的 25 个点。
+Future<Map<String, dynamic>?> fetchRawSnapshot() async {
+  final DateTime now = DateTime.now().toUtc().add(const Duration(hours: 8));
+  final String node = '${_pad(now.hour)}:${_pad(now.minute)}';
+  if (!kNodes.contains(node)) return null;
+  return _buildSnapshot(now, node);
+}
+
+/// 手动刷新 / 打开 App 用：任意时刻都抓当前实时快照，node 用实际时间。
+/// 只要接口返回的是当天数据（交易日盘前/盘中/盘后均可）就有效。
+Future<Map<String, dynamic>?> fetchLiveSnapshot() async {
+  final DateTime now = DateTime.now().toUtc().add(const Duration(hours: 8));
+  if (now.weekday == 6 || now.weekday == 7) return null;
+  final String node = '${_pad(now.hour)}:${_pad(now.minute)}';
+  return _buildSnapshot(now, node);
 }

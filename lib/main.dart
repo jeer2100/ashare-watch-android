@@ -114,6 +114,7 @@ class _HomePageState extends State<HomePage> {
         _serviceOn = true;
         _message = '后台盯盘服务运行中';
       });
+      await _fetchLive(markMessage: false);
       return;
     }
 
@@ -128,6 +129,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     await _startService();
+
+    // 打开 App 时静默抓一次当前实时快照，避免"装好后一直空着"。
+    await _fetchLive(markMessage: false);
   }
 
   Future<void> _startService() async {
@@ -177,20 +181,27 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _manualFetch() async {
-    setState(() => _busy = true);
+  Future<void> _fetchLive({required bool markMessage}) async {
     try {
-      final Map<String, dynamic>? raw = await fetchRawSnapshot();
+      final Map<String, dynamic>? raw = await fetchLiveSnapshot();
       if (raw == null) {
-        _message = '当前不在抓取节点（交易日 9:40–11:30、13:00–15:00 每10分钟）';
+        if (markMessage) _message = '今天是周末，非交易日';
       } else {
         await saveSnapshot(Snapshot.fromJson(raw));
-        _message = '已抓取 ${raw['node']}：涨停 ${raw['zt']} / 炸板 ${raw['zb']}';
+        if (markMessage) {
+          _message =
+              '已抓取 ${raw['node']} 实时快照：涨停 ${raw['zt']} / 炸板 ${raw['zb']}';
+        }
       }
     } catch (e) {
-      _message = '抓取失败: $e';
+      if (markMessage) _message = '抓取失败: $e';
     }
     await _reload();
+  }
+
+  Future<void> _manualFetch() async {
+    setState(() => _busy = true);
+    await _fetchLive(markMessage: true);
     if (mounted) setState(() => _busy = false);
   }
 
@@ -359,37 +370,75 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildTimeline() {
     final Map<String, Snapshot> byNode = <String, Snapshot>{};
+    final List<Snapshot> liveRows = <Snapshot>[];
     for (final Snapshot s in _today) {
-      byNode[s.node] = s;
+      if (kNodes.contains(s.node)) {
+        byNode[s.node] = s;
+      } else {
+        liveRows.add(s);
+      }
     }
+    liveRows.sort((Snapshot a, Snapshot b) => a.node.compareTo(b.node));
 
     return Card(
       child: Column(
-        children: kNodes.map((String node) {
-          final Snapshot? row = byNode[node];
-          return ListTile(
-            dense: true,
-            leading: SizedBox(
-              width: 52,
-              child: Text(node, style: const TextStyle(fontSize: 13)),
+        children: <Widget>[
+          if (liveRows.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Row(
+                children: const <Widget>[
+                  Icon(Icons.bolt, size: 14, color: Colors.orange),
+                  SizedBox(width: 6),
+                  Text(
+                    '实时快照',
+                    style: TextStyle(fontSize: 12, color: Colors.orange),
+                  ),
+                ],
+              ),
             ),
-            title: row == null
-                ? const Text('待更新', style: TextStyle(fontSize: 13, color: Colors.grey))
-                : Text(
-                    '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
-                    style: const TextStyle(fontSize: 13),
+          ...liveRows.map((Snapshot row) => ListTile(
+                dense: true,
+                leading: SizedBox(
+                  width: 52,
+                  child: Text(
+                    row.node,
+                    style: const TextStyle(fontSize: 13, color: Colors.orange),
                   ),
-            trailing: row == null
-                ? null
-                : Text(
-                    '${row.deltaZt >= 0 ? '+' : ''}${row.deltaZt} / ${row.deltaZb >= 0 ? '+' : ''}${row.deltaZb}',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: row.deltaZt >= 0 ? Colors.red : Colors.green,
+                ),
+                title: Text(
+                  '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
+                  style: const TextStyle(fontSize: 13),
+                ),
+              )),
+          const Divider(height: 1),
+          ...kNodes.map((String node) {
+            final Snapshot? row = byNode[node];
+            return ListTile(
+              dense: true,
+              leading: SizedBox(
+                width: 52,
+                child: Text(node, style: const TextStyle(fontSize: 13)),
+              ),
+              title: row == null
+                  ? const Text('待更新',
+                      style: TextStyle(fontSize: 13, color: Colors.grey))
+                  : Text(
+                      '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
+                      style: const TextStyle(fontSize: 13),
                     ),
-                  ),
-          );
-        }).toList(),
+              trailing: row == null
+                  ? null
+                  : Text(
+                      '${row.deltaZt >= 0 ? '+' : ''}${row.deltaZt} / ${row.deltaZb >= 0 ? '+' : ''}${row.deltaZb}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: row.deltaZt >= 0 ? Colors.red : Colors.green,
+                      ),
+                    ),
+            );
+          }),
+        ],
       ),
     );
   }
