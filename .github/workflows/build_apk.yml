@@ -1,0 +1,63 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android project shell
+        run: flutter create --org com.example --project-name ashare_watch --platforms=android app
+
+      - name: Copy sources into generated project
+        run: |
+          cp -r lib/. app/lib/
+          cp pubspec.yaml app/pubspec.yaml
+          cp android/app/src/main/AndroidManifest.xml app/android/app/src/main/AndroidManifest.xml
+
+      - name: Fetch packages
+        working-directory: app
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: app
+        run: flutter build apk --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashare-watch-apk
+          path: app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: A股盯盘助手 v1.0.${{ github.run_number }}
+          body: |
+            - 每10分钟自动抓取东方财富涨停 / 炸板池
+            - 25个交易日节点时间线，支持本地累积
+            - 常驻通知显示服务状态，无需谷歌服务
+          files: app/build/app/outputs/flutter-apk/*.apk

@@ -1,0 +1,6 @@
+gh_*.txt
+gh_*.html
+push_to_github.sh
+.dart_tool/
+build/
+.git/

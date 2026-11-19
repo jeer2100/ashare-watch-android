@@ -1,0 +1,20 @@
+name: ashare_watch
+description: A股涨停炸板盯盘助手 - 每10分钟自动抓取涨停/炸板池
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  flutter_foreground_task: ^11.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
