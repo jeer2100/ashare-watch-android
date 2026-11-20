@@ -539,7 +539,7 @@ class _HomePageState extends State<HomePage> {
         '${snap.deltaZt >= 0 ? '+' : ''}${snap.deltaZt} 家，'
         '炸板 ${snap.deltaZb >= 0 ? '+' : ''}${snap.deltaZb} 家' + dsExtra;
 
-    String statCell(String value, String label) {
+    Widget statCell(String value, String label) {
       return Expanded(
         child: Column(
           children: <Widget>[
