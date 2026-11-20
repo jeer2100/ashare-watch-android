@@ -89,24 +89,68 @@ function analyzePool(pool) {
   };
 }
 
-async function fetchSnap(forceLive) {
+function fbtSec(v) {
+  const s = String(v || 0).padStart(6, '0');
+  return (+s.slice(0, 2)) * 3600 + (+s.slice(2, 4)) * 60 + (+s.slice(4, 6));
+}
+function nodeSec(node) {
+  const p = node.split(':').map(Number);
+  return p[0] * 3600 + p[1] * 60;
+}
+
+// 抓一次全量池，按首次封板时间回推当日所有"已完成"节点（未来节点不生成）
+async function fetchBackfill() {
   const now = beijingNow();
-  if (now.weekday === 0 || now.weekday === 6) return null;
-  if (!forceLive && !NODES.includes(now.node)) return null;
+  if (now.weekday === 0 || now.weekday === 6) return [];
   const compact = '' + now.year + pad(now.month) + pad(now.day);
   const date = now.year + '-' + pad(now.month) + '-' + pad(now.day);
-  const zt = await fetchPool('getTopicZTPool', compact, now.node);
-  if (zt.qdate !== compact) return null;
+  const zt = await fetchPool('getTopicZTPool', compact, 'backfill');
+  if (zt.qdate !== compact) return [];
   let zb = { tc: 0, pool: [] };
-  try { zb = await fetchPool('getTopicZBPool', compact, now.node); } catch (e) {}
-  const detail = analyzePool(zt.pool);
-  const sector = detail.sectors.length ? detail.sectors[0].name : '-';
-  const maxLb = detail.ladder.length ? detail.ladder[0].n : 0;
-  return {
-    date, node: now.node, zt: zt.tc, zb: zb.tc,
-    topSector: sector, maxLb, ts: Date.now(),
-    live: !NODES.includes(now.node), detail
-  };
+  try { zb = await fetchPool('getTopicZBPool', compact, 'backfill'); } catch (e) {}
+  const nowMin = now.node.split(':').map(Number);
+  const nowSec = nowMin[0] * 3600 + nowMin[1] * 60;
+
+  const rows = [];
+  let prevSectors = null;
+  let prevZt = 0, prevZb = 0;
+  for (const node of NODES) {
+    if (nodeSec(node) > nowSec) break;
+    const ztList = zt.pool.filter(x => fbtSec(x.fbt) <= nodeSec(node));
+    const zbList = (zb.pool || []).filter(x => fbtSec(x.fbt) <= nodeSec(node));
+    const detail = analyzePool(ztList);
+    const cur = {};
+    (detail.sectors || []).forEach(s => { cur[s.name] = s.n; });
+    const sectorDelta = [];
+    Object.keys(cur).forEach(k => {
+      const d = cur[k] - ((prevSectors && prevSectors[k]) || 0);
+      if (d > 0) sectorDelta.push({ name: k, d: d });
+    });
+    sectorDelta.sort((a, b) => b.d - a.d);
+    detail.deltaSector = sectorDelta.length ? sectorDelta[0] : null;
+    rows.push({
+      date, node,
+      zt: ztList.length, zb: zbList.length,
+      topSector: detail.sectors.length ? detail.sectors[0].name : '-',
+      maxLb: detail.ladder.length ? detail.ladder[0].n : 0,
+      ts: Date.now(), detail,
+      deltaZt: ztList.length - prevZt,
+      deltaZb: zbList.length - prevZb
+    });
+    prevZt = ztList.length;
+    prevZb = zbList.length;
+    prevSectors = cur;
+  }
+  return rows;
+}
+
+// 批量覆盖当天节点（其余日期保留）
+function storeBackfill(rows) {
+  if (!rows || !rows.length) return;
+  const date = rows[0].date;
+  const all = load().filter(s => s.date !== date).concat(rows);
+  all.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.node < b.node ? -1 : 1)));
+  localStorage.setItem(KEY, JSON.stringify(all.slice(-1200)));
 }
 
 async function grab(manual) {
@@ -114,12 +158,12 @@ async function grab(manual) {
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true;
   try {
-    const snap = await fetchSnap(true);
-    if (!snap) {
-      if (manual) msg.textContent = '今天是周末，非交易日';
+    const rows = await fetchBackfill();
+    if (!rows.length) {
+      if (manual) msg.textContent = '今天非交易日或接口暂未返回数据';
     } else {
-      store(snap);
-      if (manual) msg.textContent = '已抓取 ' + snap.node + ' 实时快照：涨停 ' + snap.zt + ' / 炸板 ' + snap.zb;
+      storeBackfill(rows);
+      if (manual) msg.textContent = '已回填当日 ' + rows.length + ' 个节点（截至 ' + rows[rows.length - 1].node + '）';
     }
   } catch (e) {
     if (manual) msg.textContent = '抓取失败：' + e.message;
@@ -132,24 +176,8 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-async function openDetail(snap) {
-  // 旧快照可能没有明细字段：现场抓一次当前明细补上（东财只提供当前状态）
-  let s = snap;
-  if (!snap.detail || !(snap.detail.sectors || []).length) {
-    const mask = document.getElementById('detailMask');
-    mask.classList.add('show');
-    document.getElementById('dtitle').textContent = snap.node;
-    document.getElementById('dbody').innerHTML = '<div style="color:#888;font-size:13px;">正在加载明细…</div>';
-    try {
-      const fresh = await fetchSnap(true);
-      if (fresh && fresh.detail) {
-        s = Object.assign({}, snap, { detail: fresh.detail });
-        s = store(s); // 重新计算增量板块
-        render();
-      }
-    } catch (e) {}
-  }
-  renderDetail(s);
+function openDetail(snap) {
+  renderDetail(snap);
 }
 
 function renderDetail(snap) {
@@ -168,8 +196,8 @@ function renderDetail(snap) {
   const dzbTxt = dzb == null ? '—' : (dzb > 0 ? '+' + dzb : String(dzb));
   const ds = snap.deltaSector;
 
-  document.getElementById('dtitle').textContent = snap.node;
-  document.getElementById('dbadge').textContent = snap.live ? '实时快照' : '定时节点';
+  document.getElementById('dtitle').textContent = snap.node + ' 报告';
+  document.getElementById('dbadge').textContent = '盘中跟进';
   document.getElementById('dsub').textContent = (snap.date || '') + ' 周' + week;
   document.getElementById('dzt').textContent = snap.zt;
   document.getElementById('dzb').textContent = snap.zb;
@@ -177,98 +205,95 @@ function renderDetail(snap) {
   document.getElementById('dtop').textContent = ds && ds.d > 0 ? ds.name.replace(/Ⅱ|Ⅰ/g, '') : '—';
 
   let html = '';
-  // ① 涨停家数 + 按封板时间前5
-  html += '<h3>① 涨停家数与首批封板（按封板时间前 5）</h3>';
-  html += '<div>当前涨停 <b>' + snap.zt + '</b> 家，按首封时间排序前 5 位：</div>';
-  if (first.length) {
-    html += '<ol>';
-    first.forEach((x, i) => {
-      html += '<li>' + escapeHtml(x.name) + '　' + escapeHtml(x.sector) + '　' + x.fbt + ' 首封' +
-              (x.lbc ? '　' + x.lbc + ' 连板' : '') + '</li>';
-    });
-    html += '</ol>';
+  html += '<div class="muted">A股盯盘快照 · 数据源 东方财富涨停池/炸板池</div>';
+  html += '<div style="margin:8px 0;">涨停 <b>' + snap.zt + '</b> 家，炸板 <b>' + snap.zb + '</b> 家，炸板率约 ' + rate + '%。</div>';
+
+  // 涨停板块分布（前五）
+  html += '<h3>涨停板块分布（前五）：</h3>';
+  if (sectors.length) {
+    html += '<ol>' + sectors.map(x => '<li>' + escapeHtml(x.name) + '　' + x.n + ' 家</li>').join('') + '</ol>';
   } else { html += '<div class="none">暂无数据</div>'; }
 
-  // ② 连板家数 + 连板个股按封板时间前5
-  html += '<h3>② 连板涨停家数与封板时间前 5</h3>';
-  html += '<div>连板涨停 <b>' + lbCount + '</b> 家（2 板及以上，另首板 ' +
-          (d.firstBoardCount != null ? d.firstBoardCount : '—') + ' 家），按封板时间排序前 5 位：</div>';
+  // 连板梯队
+  html += '<h3>连板梯队：</h3>';
+  html += '<div>' + (ladder.length
+          ? ladder.map(x => x.n + ' 连板 ' + x.c + ' 家').join('，')
+          : '暂无数据') + '</div>';
+  html += '<div class="muted" style="margin-top:4px;">（2 板及以上 ' + lbCount + ' 家，首板 ' +
+          (d.firstBoardCount != null ? d.firstBoardCount : '—') + ' 家）</div>';
+
+  // 首批封板示例（前五）
+  html += '<h3>首批封板示例（按封板时间前 5）：</h3>';
+  if (first.length) {
+    html += '<div>' + first.map(x => escapeHtml(x.name) + '（' + x.fbt + ' 首封）').join('、') + '</div>';
+  } else { html += '<div class="none">暂无数据</div>'; }
+
+  // 连板个股按封板时间前5
+  html += '<h3>连板个股（按封板时间前 5）：</h3>';
   if (lbFirst.length) {
-    html += '<ol>';
-    lbFirst.forEach((x, i) => {
-      html += '<li>' + escapeHtml(x.name) + '　' + escapeHtml(x.sector) + '　' + x.lbc + ' 连板　' + x.fbt + ' 封板</li>';
-    });
-    html += '</ol>';
+    html += '<div>' + lbFirst.map(x => escapeHtml(x.name) + '　' + x.lbc + ' 连板　' + x.fbt + ' 封板　' + escapeHtml(x.sector)).join('<br>') + '</div>';
   } else { html += '<div class="none">当前无连板个股</div>'; }
 
-  // ③ 前两条个股分别所属板块
-  html += '<h3>③ 上述个股分别所属板块</h3>';
-  const bySector = {};
-  const seen = {};
-  first.concat(lbFirst).forEach(x => {
-    if (seen[x.name]) return;
-    seen[x.name] = 1;
-    if (!bySector[x.sector]) bySector[x.sector] = [];
-    bySector[x.sector].push(x.name + (x.lbc ? '（' + x.lbc + '板）' : ''));
-  });
-  const skeys = Object.keys(bySector);
-  if (skeys.length) {
-    html += '<div class="sector-list">';
-    skeys.forEach(k => {
-      html += '<div><b>' + escapeHtml(k) + '</b>：' + bySector[k].map(escapeHtml).join('、') + '</div>';
-    });
-    html += '</div>';
-  } else { html += '<div class="none">暂无数据</div>'; }
-  if (sectors.length) {
-    html += '<div class="muted" style="margin-top:6px;">全部涨停板块分布（前五）：' +
-            sectors.map(x => escapeHtml(x.name) + ' ' + x.n + ' 家').join('，') + '</div>';
-  }
+  // 节点变化与炸板
+  html += '<h3>节点变化与炸板：</h3>';
+  html += '<div>较上一节点：涨停 <b>' + dzTxt + '</b> 家，炸板 <b>' + dzbTxt + '</b> 家' +
+          (ds && ds.d > 0 ? '，增量最多板块 <b>' + escapeHtml(ds.name) + '</b>（+' + ds.d + ' 家）' : '') + '。</div>';
 
-  // ④ 节点变化 + 增量最多板块 + 炸板
-  html += '<h3>④ 节点变化与炸板</h3>';
-  html += '<div>较上一节点：涨停 <b>' + dzTxt + '</b> 家' +
-          (ds && ds.d > 0 ? '，增量最多板块 <b>' + escapeHtml(ds.name) + '</b>（+' + ds.d + ' 家）' : '，无板块净增加') + '。</div>';
-  html += '<div>炸板 <b>' + snap.zb + '</b> 家（较上一节点 ' + dzbTxt + ' 家），炸板率约 ' + rate + '%。</div>';
-  if (ladder.length) {
-    html += '<div class="muted" style="margin-top:6px;">连板梯队：' +
-            ladder.map(x => x.n + ' 板 ' + x.c + ' 家').join('，') + '（含首板）</div>';
-  }
-
-  html += '<h3>说明</h3><div class="muted">本快照为' + (snap.live ? '打开页面时点实时抓取' : '该节点页面打开期间抓取') +
-          '，东财接口只提供当前状态，历史节点无法回补。仅供参考，不构成投资建议。</div>';
+  html += '<h3>说明</h3><div class="muted">本节点数据按东方财富首次封板时间回推，为当日已达节点的历史近似快照，非当时时点实时抓取。仅供参考，不构成投资建议。</div>';
   document.getElementById('dbody').innerHTML = html;
   document.getElementById('detailMask').classList.add('show');
+}
+
+function renderChart(byNode) {
+  const box = document.getElementById('chart');
+  if (!box) return;
+  const maxZt = Math.max(1, ...NODES.map(n => byNode[n] ? byNode[n].zt : 0));
+  const seg = (label, nodes) => {
+    let h = '<div class="cseg-label">' + label + '</div><div class="cbar-row">';
+    nodes.forEach(n => {
+      const s = byNode[n];
+      const pct = s ? Math.max(5, Math.round(s.zt / maxZt * 100)) : 0;
+      h += '<div class="cbar-col">' +
+             '<div class="cbar-val">' + (s ? s.zt : '-') + '</div>' +
+             '<div class="cbar-track"><div class="cbar" style="height:' + pct + '%"></div></div>' +
+             '<div class="cbar-time">' + n + '</div>' +
+           '</div>';
+    });
+    return h + '</div>';
+  };
+  const done = NODES.filter(n => byNode[n]).length;
+  box.innerHTML =
+    '<div class="chead"><span>涨停家数走势</span><span class="cdone">已更新 ' + done + '/25</span></div>' +
+    seg('早盘 9:40 – 11:30', NODES.slice(0, 12)) +
+    seg('午盘 13:00 – 15:00', NODES.slice(12));
 }
 
 function render() {
   const now = beijingNow();
   const today = now.year + '-' + pad(now.month) + '-' + pad(now.day);
-  const rows = load().filter(s => s.date === today).sort((a, b) => a.node < b.node ? -1 : 1);
+  const rows = load().filter(s => s.date === today && NODES.includes(s.node)).sort((a, b) => a.node < b.node ? -1 : 1);
   const latest = rows[rows.length - 1];
-  document.getElementById('dateLabel').textContent = today + ' · ' + (latest ? latest.node + ' 快照' : '暂无快照');
+  document.getElementById('dateLabel').textContent = today + ' · ' + (latest ? latest.node + ' 快照' : '暂无数据');
   document.getElementById('zt').textContent = latest ? latest.zt : '—';
   document.getElementById('zb').textContent = latest ? latest.zb : '—';
   document.getElementById('ztDelta').textContent = latest ? '较上一节点 ' + (latest.deltaZt >= 0 ? '+' : '') + latest.deltaZt : '';
   document.getElementById('zbDelta').textContent = latest ? '较上一节点 ' + (latest.deltaZb >= 0 ? '+' : '') + latest.deltaZb : '';
   document.getElementById('sector').textContent = latest ? '最强板块：' + latest.topSector + '　最高连板：' + latest.maxLb + ' 板' : '';
   const byNode = {};
-  const liveRows = [];
-  rows.forEach(s => { if (NODES.includes(s.node)) byNode[s.node] = s; else liveRows.push(s); });
-  const liveHtml = liveRows.map(s =>
-    '<div class="row clickable" data-node="' + s.node + '"><span class="time" style="color:#e69500">' + s.node + '</span><span class="info">涨停 ' + s.zt + ' · 炸板 ' + s.zb + ' · ' + s.topSector + ' <span style="color:#e69500">(实时)</span></span><span class="arrow">›</span></div>'
-  ).join('');
+  rows.forEach(s => { byNode[s.node] = s; });
+  renderChart(byNode);
   const nodeHtml = NODES.map(n => {
     const s = byNode[n];
-    if (!s) return '<div class="row waiting"><span class="time">' + n + '</span><span class="info">待更新</span></div>';
+    if (!s) return '<div class="row waiting"><span class="time">' + n + '</span><span class="info">待更新</span><span class="arrow">›</span></div>';
     const d = s.deltaZt >= 0 ? '+' + s.deltaZt : '' + s.deltaZt;
     return '<div class="row clickable" data-node="' + n + '"><span class="time">' + n + '</span><span class="info">涨停 ' + s.zt + ' · 炸板 ' + s.zb + ' · ' + s.topSector + '</span><span class="delta">' + d + '</span><span class="arrow">›</span></div>';
   }).join('');
   const timeline = document.getElementById('timeline');
-  timeline.innerHTML = liveHtml + nodeHtml;
+  timeline.innerHTML = nodeHtml;
   timeline.querySelectorAll('.clickable').forEach(el => {
     el.addEventListener('click', () => {
       const node = el.getAttribute('data-node');
-      const snap = rows.find(s => s.node === node);
+      const snap = byNode[node];
       if (snap) openDetail(snap);
     });
   });
@@ -287,16 +312,8 @@ document.getElementById('detailMask').addEventListener('click', (e) => {
 });
 render();
 grab(false);
-setInterval(() => {
-  const now = beijingNow();
-  const today = now.year + '-' + pad(now.month) + '-' + pad(now.day);
-  if (NODES.includes(now.node)) {
-    const has = load().some(s => s.date === today && s.node === now.node);
-    if (!has) {
-      fetchSnap(false).then(s => { if (s) { store(s); render(); } }).catch(() => {});
-    }
-  }
-}, 60000);
+// 页面停留期间每 2 分钟回补一次（新节点到达后自动补上）
+setInterval(() => { grab(false); }, 120000);
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

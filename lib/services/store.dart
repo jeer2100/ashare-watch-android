@@ -15,6 +15,8 @@ class Snapshot {
   final String topSector;
   final int maxLb;
   final int ts;
+  // 明细：板块分布/连板梯队/首封前5/连板前5/增量最多板块
+  final Map<String, dynamic>? detail;
 
   const Snapshot({
     required this.date,
@@ -26,6 +28,7 @@ class Snapshot {
     required this.topSector,
     required this.maxLb,
     required this.ts,
+    this.detail,
   });
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -38,6 +41,7 @@ class Snapshot {
         'topSector': topSector,
         'maxLb': maxLb,
         'ts': ts,
+        if (detail != null) 'detail': detail,
       };
 
   factory Snapshot.fromJson(Map<String, dynamic> json) => Snapshot(
@@ -50,6 +54,9 @@ class Snapshot {
         topSector: json['topSector']?.toString() ?? '-',
         maxLb: _int(json['maxLb']),
         ts: _int(json['ts']),
+        detail: json['detail'] is Map<String, dynamic>
+            ? json['detail'] as Map<String, dynamic>
+            : null,
       );
 
   Snapshot copyWithDelta({required int deltaZt, required int deltaZb}) =>
@@ -63,6 +70,7 @@ class Snapshot {
         topSector: topSector,
         maxLb: maxLb,
         ts: ts,
+        detail: detail,
       );
 }
 
@@ -112,11 +120,25 @@ Future<void> saveSnapshot(Snapshot snapshot) async {
     all.add(updated);
   }
 
+  await _writeAll(all);
+}
+
+/// 批量覆盖：用回补结果整体替换当天节点（保留其它日期历史）。
+Future<void> saveBackfill(List<Snapshot> snapshots) async {
+  if (snapshots.isEmpty) return;
+  final String date = snapshots.first.date;
+  final List<Snapshot> all = await loadSnapshots();
+  final List<Snapshot> kept =
+      all.where((Snapshot s) => s.date != date).toList();
+  kept.addAll(snapshots);
+  await _writeAll(kept);
+}
+
+Future<void> _writeAll(List<Snapshot> all) async {
   all.sort((Snapshot a, Snapshot b) {
     final int byDate = a.date.compareTo(b.date);
     return byDate != 0 ? byDate : a.node.compareTo(b.node);
   });
-
   final List<Snapshot> trimmed =
       all.length > 1200 ? all.sublist(all.length - 1200) : all;
   await _storeFile.writeAsString(

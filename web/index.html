@@ -27,6 +27,18 @@
   .row .delta { font-size:12px; }
   .row.waiting { color:#aaa; }
   .row.clickable { cursor:pointer; }
+  /* 柱状图 */
+  .chead { display:flex; justify-content:space-between; align-items:center; font-size:14px; font-weight:500; margin-bottom:12px; }
+  .cdone { font-size:12px; color:#999; font-weight:400; }
+  .cseg-label { font-size:12px; color:#999; margin:10px 0 4px; }
+  .cbar-row { display:flex; align-items:flex-end; height:96px; }
+  .cbar-col { flex:1; display:flex; flex-direction:column; align-items:center; height:100%; }
+  .cbar-val { font-size:10px; color:#c62828; height:14px; line-height:14px; }
+  .cbar-track { flex:1; width:100%; display:flex; align-items:flex-end; justify-content:center; }
+  .cbar { width:70%; max-width:14px; background:#e57373; border-radius:2px 2px 0 0; min-height:2px; }
+  .cbar-col:has(.cbar-val) { }
+  .cbar-time { font-size:8px; color:#aaa; height:12px; line-height:12px; white-space:nowrap; transform:scale(.9); }
+  .dbadge.phase { background:rgba(255,255,255,.22); }
   .row.clickable:active { background:#fafafa; }
   .arrow { color:#bbb; font-size:14px; margin-left:6px; }
   button { background:#c62828; color:#fff; border:none; border-radius:8px; padding:10px 14px; font-size:14px; width:100%; }
@@ -62,12 +74,12 @@
 <body>
 <header>
   <h1>A股盯盘助手</h1>
-  <p>涨停 / 炸板 25 节点 · 打开即抓当前快照</p>
+  <p>涨停 / 炸板 25 节点 · 自动回填当日已完成节点</p>
 </header>
 <main>
   <div class="card">
-    <button id="fetchBtn">立即抓取当前快照</button>
-    <div id="msg">页面打开时会自动抓取一次，并每分钟检查新节点</div>
+    <button id="fetchBtn">立即回填当日节点</button>
+    <div id="msg">页面打开时自动回填当日已完成节点，停留期间每 2 分钟更新一次</div>
   </div>
   <div class="card" id="summaryCard">
     <div id="dateLabel" style="font-size:12px;color:#777;margin-bottom:10px;">今日</div>
@@ -77,8 +89,9 @@
     </div>
     <div id="sector" style="font-size:12px;color:#666;margin-top:10px;"></div>
   </div>
+  <div class="card" id="chart"></div>
   <div class="card"><div id="timeline"></div></div>
-  <p class="tip">数据来自东方财富公开接口。点任意有数据的节点，可查看四条明细：涨停前 5 个股、连板前 5 个股、个股所属板块、较上一节点增量与炸板家数。本版本为网页 App，需在页面打开时才能抓取；关闭页面后不会后台更新。可通过浏览器菜单「添加到主屏幕」获得独立图标。</p>
+  <p class="tip">数据来自东方财富公开接口，按首次封板时间回推当日已完成节点，早期节点为近似值。点任意有数据的节点查看明细：涨停前 5、连板前 5、个股所属板块、节点增量与炸板。本网页版需在页面打开时回填，关闭后不后台更新；「添加到主屏幕」可获得独立图标。</p>
 </main>
 
 <div id="detailMask">

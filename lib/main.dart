@@ -18,9 +18,9 @@ void startCallback() {
 
 Future<void> runTick() async {
   try {
-    final Map<String, dynamic>? raw = await fetchRawSnapshot();
-    if (raw == null) return;
-    await saveSnapshot(Snapshot.fromJson(raw));
+    final List<Map<String, dynamic>> rows = await fetchBackfillSnapshots();
+    if (rows.isEmpty) return;
+    await saveBackfill(rows.map(Snapshot.fromJson).toList());
   } catch (_) {}
 }
 
@@ -90,7 +90,7 @@ class _HomePageState extends State<HomePage> {
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'ashare_watch',
         channelName: '盯盘服务',
-        channelDescription: '每10分钟自动抓取涨停与炸板数据',
+        channelDescription: '定时回补涨停与炸板节点数据',
         onlyAlertOnce: true,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
@@ -98,7 +98,7 @@ class _HomePageState extends State<HomePage> {
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(60000),
+        eventAction: ForegroundTaskEventAction.repeat(120000),
         autoRunOnBoot: true,
         autoRunOnMyPackageReplaced: true,
         allowWakeLock: true,
@@ -114,7 +114,7 @@ class _HomePageState extends State<HomePage> {
         _serviceOn = true;
         _message = '后台盯盘服务运行中';
       });
-      await _fetchLive(markMessage: false);
+      await _refresh(markMessage: false);
       return;
     }
 
@@ -129,9 +129,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     await _startService();
-
-    // 打开 App 时静默抓一次当前实时快照，避免"装好后一直空着"。
-    await _fetchLive(markMessage: false);
+    await _refresh(markMessage: false);
   }
 
   Future<void> _startService() async {
@@ -142,7 +140,7 @@ class _HomePageState extends State<HomePage> {
         ],
         serviceId: 256,
         notificationTitle: 'A股盯盘助手运行中',
-        notificationText: '每10分钟自动抓取涨停 / 炸板快照',
+        notificationText: '自动回补当日涨停 / 炸板节点',
         callback: startCallback,
       );
       setState(() {
@@ -176,21 +174,22 @@ class _HomePageState extends State<HomePage> {
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     if (!mounted) return;
     setState(() {
-      _today = all.where((Snapshot s) => s.date == today).toList()
-        ..sort((Snapshot a, Snapshot b) => a.node.compareTo(b.node));
+      _today = all
+          .where((Snapshot s) => s.date == today && kNodes.contains(s.node))
+          .toList()
+            ..sort((Snapshot a, Snapshot b) => a.node.compareTo(b.node));
     });
   }
 
-  Future<void> _fetchLive({required bool markMessage}) async {
+  Future<void> _refresh({required bool markMessage}) async {
     try {
-      final Map<String, dynamic>? raw = await fetchLiveSnapshot();
-      if (raw == null) {
-        if (markMessage) _message = '今天是周末，非交易日';
+      final List<Map<String, dynamic>> rows = await fetchBackfillSnapshots();
+      if (rows.isEmpty) {
+        if (markMessage) _message = '今天非交易日或接口暂未返回数据';
       } else {
-        await saveSnapshot(Snapshot.fromJson(raw));
+        await saveBackfill(rows.map(Snapshot.fromJson).toList());
         if (markMessage) {
-          _message =
-              '已抓取 ${raw['node']} 实时快照：涨停 ${raw['zt']} / 炸板 ${raw['zb']}';
+          _message = '已回填当日 ${rows.length} 个节点（截至 ${rows.last['node']}）';
         }
       }
     } catch (e) {
@@ -201,14 +200,14 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _manualFetch() async {
     setState(() => _busy = true);
-    await _fetchLive(markMessage: true);
+    await _refresh(markMessage: true);
     if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _clear() async {
     await clearSnapshots();
     await _reload();
-    if (mounted) setState(() => _message = '本地记录已清空');
+    if (mounted) setState(() => _message = '本地记录已清空，下拉可重新回填');
   }
 
   @override
@@ -227,7 +226,7 @@ class _HomePageState extends State<HomePage> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: '立即抓取',
+            tooltip: '立即回填',
             onPressed: _busy ? null : _manualFetch,
           ),
         ],
@@ -238,6 +237,8 @@ class _HomePageState extends State<HomePage> {
           padding: const EdgeInsets.all(16),
           children: <Widget>[
             _buildStatusCard(),
+            const SizedBox(height: 16),
+            _buildChart(),
             const SizedBox(height: 16),
             _buildSummaryCard(latest, todayLabel),
             const SizedBox(height: 16),
@@ -275,7 +276,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  _serviceOn ? '后台自动抓取已开启' : '后台自动抓取未开启',
+                  _serviceOn ? '后台自动回填已开启' : '后台自动回填未开启',
                   style: const TextStyle(fontSize: 14),
                 ),
                 const Spacer(),
@@ -296,6 +297,99 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // 涨停家数走势柱状图：早盘 / 午盘两段，已过节点画柱，未到节点显示 -
+  Widget _buildChart() {
+    final Map<String, Snapshot> byNode = <String, Snapshot>{};
+    for (final Snapshot s in _today) {
+      byNode[s.node] = s;
+    }
+    final int maxZt = _today.fold<int>(
+        0, (int m, Snapshot s) => s.zt > m ? s.zt : m);
+    final int done = byNode.length;
+
+    Widget segment(String title, List<String> nodes) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 4),
+          SizedBox(
+            height: 104,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: nodes.map((String node) {
+                final Snapshot? s = byNode[node];
+                final double ratio =
+                    s == null ? 0 : s.zt / (maxZt == 0 ? 1 : maxZt);
+                final double barH = s == null
+                    ? 0.0
+                    : (ratio * 60).clamp(3.0, 60.0).toDouble();
+                return Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: <Widget>[
+                      Text(
+                        s == null ? '-' : '${s.zt}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: s == null ? Colors.grey : Colors.red,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Container(
+                        height: barH,
+                        width: double.infinity,
+                        margin: const EdgeInsets.symmetric(horizontal: 1),
+                        decoration: BoxDecoration(
+                          color: s == null
+                              ? Colors.grey.withOpacity(0.15)
+                              : Colors.red.withOpacity(0.75),
+                          borderRadius: const BorderRadius.vertical(
+                              top: Radius.circular(2)),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        node.substring(0, 2) == '0'
+                            ? node.substring(1)
+                            : node,
+                        style: const TextStyle(fontSize: 8, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: <Widget>[
+                const Text('涨停家数走势',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                Text('已更新 $done/25',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            segment('早盘 9:40 – 11:30', kNodes.sublist(0, 12)),
+            const SizedBox(height: 14),
+            segment('午盘 13:00 – 15:00', kNodes.sublist(12)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildSummaryCard(Snapshot? latest, String todayLabel) {
     return Card(
       child: Padding(
@@ -304,7 +398,7 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Text(
-              '$todayLabel · ${latest == null ? '暂无快照' : '${latest.node} 快照'}',
+              '$todayLabel · ${latest == null ? '暂无数据' : '${latest.node} 快照'}',
               style: const TextStyle(fontSize: 13, color: Colors.grey),
             ),
             const SizedBox(height: 12),
@@ -370,75 +464,239 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildTimeline() {
     final Map<String, Snapshot> byNode = <String, Snapshot>{};
-    final List<Snapshot> liveRows = <Snapshot>[];
     for (final Snapshot s in _today) {
-      if (kNodes.contains(s.node)) {
-        byNode[s.node] = s;
-      } else {
-        liveRows.add(s);
-      }
+      byNode[s.node] = s;
     }
-    liveRows.sort((Snapshot a, Snapshot b) => a.node.compareTo(b.node));
-
     return Card(
       child: Column(
-        children: <Widget>[
-          if (liveRows.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Row(
-                children: const <Widget>[
-                  Icon(Icons.bolt, size: 14, color: Colors.orange),
-                  SizedBox(width: 6),
-                  Text(
-                    '实时快照',
-                    style: TextStyle(fontSize: 12, color: Colors.orange),
-                  ),
-                ],
-              ),
+        children: kNodes.map((String node) {
+          final Snapshot? row = byNode[node];
+          return ListTile(
+            dense: true,
+            leading: SizedBox(
+              width: 52,
+              child: Text(node, style: const TextStyle(fontSize: 13)),
             ),
-          ...liveRows.map((Snapshot row) => ListTile(
-                dense: true,
-                leading: SizedBox(
-                  width: 52,
-                  child: Text(
-                    row.node,
-                    style: const TextStyle(fontSize: 13, color: Colors.orange),
+            title: row == null
+                ? const Text('待更新',
+                    style: TextStyle(fontSize: 13, color: Colors.grey))
+                : Text(
+                    '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
+                    style: const TextStyle(fontSize: 13),
                   ),
-                ),
-                title: Text(
-                  '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
-                  style: const TextStyle(fontSize: 13),
-                ),
-              )),
-          const Divider(height: 1),
-          ...kNodes.map((String node) {
-            final Snapshot? row = byNode[node];
-            return ListTile(
-              dense: true,
-              leading: SizedBox(
-                width: 52,
-                child: Text(node, style: const TextStyle(fontSize: 13)),
-              ),
-              title: row == null
-                  ? const Text('待更新',
-                      style: TextStyle(fontSize: 13, color: Colors.grey))
-                  : Text(
-                      '涨停 ${row.zt}  ·  炸板 ${row.zb}  ·  ${row.topSector}',
-                      style: const TextStyle(fontSize: 13),
-                    ),
-              trailing: row == null
-                  ? null
-                  : Text(
-                      '${row.deltaZt >= 0 ? '+' : ''}${row.deltaZt} / ${row.deltaZb >= 0 ? '+' : ''}${row.deltaZb}',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: row.deltaZt >= 0 ? Colors.red : Colors.green,
+            trailing: row == null
+                ? const Icon(Icons.chevron_right, size: 16, color: Colors.grey)
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        '${row.deltaZt >= 0 ? '+' : ''}${row.deltaZt} / ${row.deltaZb >= 0 ? '+' : ''}${row.deltaZb}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: row.deltaZt >= 0 ? Colors.red : Colors.green,
+                        ),
                       ),
+                      const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
+                    ],
+                  ),
+            onTap: row == null ? null : () => _showDetail(row),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  static List<dynamic> _list(Map<String, dynamic> d, String key) =>
+      d[key] is List ? d[key] as List<dynamic> : <dynamic>[];
+
+  static String _weekday(String date) {
+    try {
+      final DateTime dt = DateTime.parse(date);
+      return const <String>['一', '二', '三', '四', '五', '六', '日'][dt.weekday - 1];
+    } catch (_) {
+      return '';
+    }
+  }
+
+  void _showDetail(Snapshot snap) {
+    final Map<String, dynamic> d = snap.detail ?? <String, dynamic>{};
+    final List<dynamic> sectors = _list(d, 'sectors').take(5).toList();
+    final List<dynamic> ladder = _list(d, 'ladder');
+    final List<dynamic> first = _list(d, 'first');
+    final List<dynamic> lbFirst = _list(d, 'lbFirst');
+    final int lbCount = d['lbCount'] is int ? d['lbCount'] as int : 0;
+    final int firstBoard = d['firstBoardCount'] is int
+        ? d['firstBoardCount'] as int
+        : 0;
+    final dynamic ds = d['deltaSector'];
+    final String rate = (snap.zt + snap.zb) > 0
+        ? (snap.zb / (snap.zt + snap.zb) * 100).toStringAsFixed(1)
+        : '0.0';
+    final String dsExtra = (ds is Map && (ds['d'] is int))
+        ? '，增量最多板块 ${ds['name']}（+${ds['d']} 家）'
+        : '';
+    final String changeLine = '较上一节点：涨停 '
+        '${snap.deltaZt >= 0 ? '+' : ''}${snap.deltaZt} 家，'
+        '炸板 ${snap.deltaZb >= 0 ? '+' : ''}${snap.deltaZb} 家' + dsExtra;
+
+    String statCell(String value, String label) {
+      return Expanded(
+        child: Column(
+          children: <Widget>[
+            Text(value,
+                style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white)),
+            const SizedBox(height: 2),
+            Text(label,
+                style: const TextStyle(fontSize: 11, color: Color(0xDDFFFFFF))),
+          ],
+        ),
+      );
+    }
+
+    Widget section(String title) => Padding(
+          padding: const EdgeInsets.only(top: 14, bottom: 4),
+          child: Text(title,
+              style: const TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w600, color: Colors.black87)),
+        );
+
+    Widget line(String text) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Text(text, style: const TextStyle(fontSize: 13, height: 1.6)),
+        );
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.9,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (BuildContext ctx, ScrollController ctrl) => Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: ListView(
+            controller: ctrl,
+            children: <Widget>[
+              Container(
+                padding: const EdgeInsets.fromLTRB(16, 18, 16, 14),
+                color: Colors.red,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            Text('${snap.node} 报告',
+                                style: const TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white)),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.22),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Text('盘中跟进',
+                                  style: TextStyle(
+                                      fontSize: 10, color: Colors.white)),
+                            ),
+                          ],
+                        ),
+                        GestureDetector(
+                          onTap: () => Navigator.pop(ctx),
+                          child: const Icon(Icons.close, color: Colors.white),
+                        ),
+                      ],
                     ),
-            );
-          }),
-        ],
+                    const SizedBox(height: 4),
+                    Text('${snap.date} 周${_weekday(snap.date)}',
+                        style: const TextStyle(
+                            fontSize: 12, color: Color(0xDDFFFFFF))),
+                  ],
+                ),
+              ),
+              Container(
+                color: Colors.red,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Row(
+                  children: <Widget>[
+                    statCell('${snap.zt}', '涨停'),
+                    statCell('${snap.zb}', '炸板'),
+                    statCell('${snap.deltaZt >= 0 ? '+' : ''}${snap.deltaZt}', '较上次'),
+                    statCell(
+                        ds is Map ? (ds['name']?.toString() ?? '-') : '-', '增板最多'),
+                  ],
+                ),
+              ),
+              Container(
+                margin: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    line('A股盯盘快照 · 数据源 东方财富涨停池/炸板池'),
+                    const SizedBox(height: 6),
+                    line('涨停 ${snap.zt} 家，炸板 ${snap.zb} 家，炸板率约 $rate%'),
+                    section('涨停板块分布（前五）：'),
+                    ...sectors.asMap().entries.map<Widget>((MapEntry<int, dynamic> e) {
+                      final Map<String, dynamic> m = e.value as Map<String, dynamic>;
+                      return line('${e.key + 1}. ${m['name']}  ${m['n']} 家');
+                    }),
+                    if (sectors.isEmpty) line('暂无数据'),
+                    section('连板梯队：'),
+                    line(ladder.isEmpty
+                        ? '暂无数据'
+                        : ladder
+                            .map((dynamic x) =>
+                                '${(x as Map<String, dynamic>)['n']}连板 ${x['c']} 家')
+                            .join('，')),
+                    const SizedBox(height: 4),
+                    Text('（2 板及以上 $lbCount 家，首板 $firstBoard 家）',
+                        style:
+                            const TextStyle(fontSize: 12, color: Colors.grey)),
+                    section('首批封板示例（按封板时间前 5）：'),
+                    ...first.map<Widget>((dynamic x) {
+                      final Map<String, dynamic> m = x as Map<String, dynamic>;
+                      return line('${m['name']}（${m['fbt']} 首封）　${m['sector']}');
+                    }),
+                    if (first.isEmpty) line('暂无数据'),
+                    section('连板个股（按封板时间前 5）：'),
+                    ...lbFirst.map<Widget>((dynamic x) {
+                      final Map<String, dynamic> m = x as Map<String, dynamic>;
+                      return line('${m['name']}　${m['lbc']} 连板　${m['fbt']} 封板');
+                    }),
+                    if (lbFirst.isEmpty) line('当前无连板个股'),
+                    section('节点变化与炸板：'),
+                    line(changeLine),
+                    const SizedBox(height: 12),
+                    const Text(
+                      '说明：本节点数据按东方财富首次封板时间回推，为当日已达节点的历史近似快照，'
+                      '非当时时点实时抓取，仅供参考，不构成投资建议。',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
